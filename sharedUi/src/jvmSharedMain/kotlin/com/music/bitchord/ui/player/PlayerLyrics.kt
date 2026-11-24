@@ -7,7 +7,6 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animate
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -45,6 +44,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -90,10 +90,13 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Paint
+import androidx.compose.ui.graphics.RenderEffect
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -215,11 +218,11 @@ private const val UNSUNG_ALPHA_STRIP = 0.55f
 /**
  * The bloom behind the line being sung, at its very strongest.
  *
- * Kept well under half strength: the halo is drawn from the same white as the
- * text, so at full alpha it stops reading as light and starts reading as a
- * second, badly printed copy of the words. What is actually drawn is this
- * scaled by each letter's own bloom, so only a properly carried note ever sees
- * the whole of it.
+ * Doubled from the original: the layer's own alpha is now at full strength
+ * (it was 0.62) and the halo is drawn [GLOW_LAYERS] times over, which roughly
+ * doubles how bright the light coming off a held note reads. What is actually
+ * drawn is this scaled by each letter's own bloom, so only a properly carried
+ * note ever sees the whole of it.
  *
  * The bloom used to be a band of light trailing the sweep's leading edge across
  * every line, which is a lamp being dragged along under the words: a shape that
@@ -229,7 +232,14 @@ private const val UNSUNG_ALPHA_STRIP = 0.55f
  * — so a line of quick syllables has no glow at all and a carried note lights
  * up letter by letter, which is where the light was always meant to come from.
  */
-private const val GLOW_ALPHA = 0.62f
+private const val GLOW_ALPHA = 1f
+
+/**
+ * How many times the blurred halo is stacked. Two layers of the same halo is
+ * what doubles the glow without widening it: a wider blur would need a bigger
+ * [GLOW_ROOM], which would push every line further apart.
+ */
+private const val GLOW_LAYERS = 2
 
 /**
  * How far the bloom spreads off a letter. Tight, because it is a letter's worth
@@ -248,6 +258,66 @@ private val GLOW_RADIUS = 6.dp
  * padding and row spacing.
  */
 private val GLOW_ROOM = 10.dp
+
+/** The last blur this row built, so a scroll frame that lands on the same radius reuses it. */
+private class BlurCache {
+    var radiusPx = -1f
+    var effect: RenderEffect? = null
+}
+
+/**
+ * Blurs the row more the lower down the list's viewport it sits.
+ *
+ * The amount is worked out in the layer block, from the row's live position,
+ * so it follows the row as it scrolls without recomposing anything: every
+ * frame the row's centre is turned into a 0..1 height on the panel, eased
+ * (smoothstep) between [BOTTOM_BLUR_FROM] and [BOTTOM_BLUR_TO] so there is no
+ * visible start line to the blur, and scaled to [BOTTOM_BLUR_MAX].
+ *
+ * [gate] is 1 where blurring is allowed and 0 where it is not (the line being
+ * sung, a hand-scrolled list, the user's blur settings); it is animated by the
+ * caller, so a row eases in and out of the blur rather than snapping.
+ *
+ * Built the same way as [Modifier.blur] with an unbounded edge: the blurred
+ * picture is allowed to spread past the row's box rather than being cut off
+ * by it, which is what prevents a hard edge or clipped text at the sides and
+ * the bottom.
+ */
+@Composable
+private fun Modifier.bottomBlur(
+    listState: LazyListState,
+    index: Int,
+    gate: () -> Float,
+): Modifier {
+    val cache = remember { BlurCache() }
+    return graphicsLayer {
+        val open = gate()
+        val info = listState.layoutInfo
+        val item = if (open > 0.001f) info.visibleItemsInfo.firstOrNull { it.index == index } else null
+        val span = (info.viewportEndOffset - info.viewportStartOffset).toFloat()
+        if (item == null || span <= 0f) {
+            renderEffect = null
+            return@graphicsLayer
+        }
+        val height = ((item.offset + item.size / 2f - info.viewportStartOffset) / span)
+            .coerceIn(0f, 1f)
+        val t = ((height - BOTTOM_BLUR_FROM) / (BOTTOM_BLUR_TO - BOTTOM_BLUR_FROM)).coerceIn(0f, 1f)
+        val eased = t * t * (3f - 2f * t)
+        // Whole quarter-pixels: a radius that is the same to the eye is the
+        // same object, so a still or slowly moving row builds nothing.
+        val radius = (BOTTOM_BLUR_MAX.toPx() * eased * open * 4f).roundToInt() / 4f
+        if (radius < 0.25f) {
+            renderEffect = null
+        } else {
+            if (radius != cache.radiusPx) {
+                cache.radiusPx = radius
+                cache.effect = BlurEffect(radius, radius, TileMode.Decal)
+            }
+            renderEffect = cache.effect
+        }
+        clip = false
+    }
+}
 
 /** Applies group alpha while leaving [outset] available for draw overflow. */
 private fun Modifier.alphaLayerWithOutset(alpha: () -> Float, outset: Dp): Modifier = drawWithCache {
@@ -345,7 +415,7 @@ private val WORD_RISE = 2.dp
  * and the swell together, which is why it is well over the one rise an
  * ordinary word needs.
  */
-private const val GROW_HEADROOM = 3f
+private const val GROW_HEADROOM = 4f
 
 /**
  * The lane kept clear on the far side of a duet line.
@@ -378,7 +448,21 @@ private val GAP_ROW_SPACING = 16.dp
  * further out, which is most of the list.
  */
 private val LINE_FALLOFF_ALPHA = floatArrayOf(1f, 0.8f, 0.7f, 0.58f, 0.46f)
-private val LINE_FALLOFF_BLUR = arrayOf(0.dp, 1.dp, 1.dp, 1.7.dp, 2.4.dp)
+/**
+ * How blurred a row is, decided by where it sits on the screen rather than by
+ * how far it is from the line being sung: sharp in the top of the panel, and
+ * softening steadily the lower it is, to [BOTTOM_BLUR_MAX] at the very bottom.
+ * See [bottomBlur].
+ *
+ * The blur is the radius of the Gaussian, so it grows with the row's height
+ * on screen continuously — a line scrolling down the panel gets softer a
+ * pixel at a time instead of stepping between a few preset levels.
+ */
+private val BOTTOM_BLUR_MAX = 8.dp
+
+/** Where on the panel the blur starts, and where it reaches its full amount. */
+private const val BOTTOM_BLUR_FROM = 0.18f
+private const val BOTTOM_BLUR_TO = 1f
 
 /**
  * The same falloff for a phone, where the sung line is read from the top and
@@ -939,7 +1023,7 @@ private fun SweptLyricLine(
             onTextLayout = { layout = it },
             modifier = riseAgainst(room),
         )
-        if (glowAlpha > 0.01f) {
+        if (glowAlpha > 0.01f) repeat(GLOW_LAYERS) {
             val glowAlphaLayer = if (glowLayerOutset > 0.dp) {
                 Modifier.alphaLayerWithOutset(alpha = { glowAlpha }, outset = glowLayerOutset)
             } else {
@@ -2145,10 +2229,13 @@ internal fun LyricsPanel(
             // the same floor rather than fading to nothing.
             val falloff = if (centerFocus) LINE_FALLOFF_ALPHA else LINE_FALLOFF_ALPHA_PHONE
             val step = distance.coerceAtMost(falloff.lastIndex)
-            val blur by animateDpAsState(
+            // 1 where this row may be blurred, 0 where it must stay sharp. How
+            // much it is blurred is read off its height on the panel; see
+            // [bottomBlur].
+            val blurGate by animateFloatAsState(
                 targetValue = when {
-                    !isSynced || reduceDynamicBlur || !lyricsBlur || browsing || isActive -> 0.dp
-                    else -> LINE_FALLOFF_BLUR[step.coerceAtMost(LINE_FALLOFF_BLUR.lastIndex)]
+                    !isSynced || reduceDynamicBlur || !lyricsBlur || browsing || isActive -> 0f
+                    else -> 1f
                 },
                 animationSpec = tween(LYRIC_SETTLE_MS, easing = LYRIC_EASING),
                 label = "lyricBlur",
@@ -2205,7 +2292,7 @@ internal fun LyricsPanel(
                 ) {
                 Box(
                     modifier = Modifier
-                        .blur(blur, BlurredEdgeTreatment.Unbounded)
+                        .bottomBlur(listState, index) { blurGate }
                         .clip(RoundedCornerShape(10.dp))
                         // A gap is nothing to pick, so it only ever seeks — and
                         // not even that while a pick is open, where a stray tap
@@ -2347,7 +2434,7 @@ internal fun LyricsPanel(
                                 )
                         }
                     }
-                    .blur(blur, BlurredEdgeTreatment.Unbounded)
+                    .bottomBlur(listState, index) { blurGate }
                     .clip(RoundedCornerShape(10.dp))
                     // The chosen lines are marked on the row itself rather
                     // than with a mark beside it: a lane down the side would

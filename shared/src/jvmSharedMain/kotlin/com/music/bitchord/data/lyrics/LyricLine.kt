@@ -400,13 +400,13 @@ class GrowingWord internal constructor(
 
     init {
         val held = (endMs - startMs).coerceAtLeast(1L).toFloat()
-        // How much of the full treatment this word has earned. Cubed, so the
+        // How much of the full treatment this word has earned. Squared, so the
         // difference between a word held for a second and one held for three is
-        // most of the range and everything under a second is barely anything —
-        // the alternative reads as every word twitching.
+        // still most of the range, but a medium hold now gets a clearly visible
+        // wave rather than a barely-there one.
         val earned = ((held - GROW_RAMP_MIN_MS) / (GROW_RAMP_MAX_MS - GROW_RAMP_MIN_MS))
             .coerceIn(0f, 1f)
-            .let { it * it * it }
+            .let { it * it }
         val decay = decayRate(chars, held)
         // A word barely over the line glows less than one held twice as long,
         // and a long word spreads what it has over more letters.
@@ -590,11 +590,11 @@ private fun Char.isJoinedScript(): Boolean =
 private const val GROW_MAX_CHARS = 7
 
 /** How long a word of each length has to be held before it qualifies. */
-private const val GROW_MIN_SOLO_MS = 1_100L
-private const val GROW_MIN_SHORT_MS = 1_360L
-private const val GROW_SHORT_STEP_MS = 140L
-private const val GROW_MIN_FOUR_MS = 1_050L
-private const val GROW_MIN_LONG_MS = 900L
+private const val GROW_MIN_SOLO_MS = 850L
+private const val GROW_MIN_SHORT_MS = 1_000L
+private const val GROW_SHORT_STEP_MS = 100L
+private const val GROW_MIN_FOUR_MS = 800L
+private const val GROW_MIN_LONG_MS = 800L
 private const val GROW_MS_PER_CHAR = 200L
 
 private const val GROW_DECAY_LONG_CHARS = 5
@@ -609,7 +609,7 @@ private const val GROW_DECAY_MAX = 0.7f
  * Each letter starts this far — as a share of the word's own length — after the
  * one before it, so the swell travels rather than pulsing.
  */
-private const val GROW_STAGGER = 0.09f
+private const val GROW_STAGGER = 0.10f
 
 /** The whole move runs half again as long as the word is held. */
 private const val GROW_SPAN = 1.5f
@@ -623,16 +623,16 @@ private const val GROW_OUT = 0.75f
 private const val GROW_REST = 1f
 
 /** The window over which a longer hold earns more of the treatment. */
-private const val GROW_RAMP_MIN_MS = 400f
+private const val GROW_RAMP_MIN_MS = 300f
 private const val GROW_RAMP_MAX_MS = 3_000f
 
 /** Swell every qualifying letter gets, and the range the hold adds on top. */
-private const val GROW_BASE_SHORT = 0.05f
-private const val GROW_BASE_LONG = 0.04f
-private const val GROW_SCALE_RANGE = 0.08f
+private const val GROW_BASE_SHORT = 0.08f
+private const val GROW_BASE_LONG = 0.07f
+private const val GROW_SCALE_RANGE = 0.14f
 
 /** The most any letter swells, which is what [GrowingWord] reads the lift off. */
-private const val GROW_SCALE_CEILING = 0.1f
+private const val GROW_SCALE_CEILING = 0.2f
 
 /** Taken back off the swell so it stops a hair short of the ceiling. */
 private const val GROW_SCALE_TRIM = 0.98f
